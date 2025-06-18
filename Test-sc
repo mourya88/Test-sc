@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+
+import boto3
+import argparse
+import json
+import time
+import sys
+from botocore.exceptions import ClientError, BotoCoreError
+
+def create_service_catalog_client():
+    try:
+        return boto3.client('servicecatalog')
+    except Exception as e:
+        print(f"❌ Error creating Service Catalog client: {e}")
+        sys.exit(1)
+
+def load_parameters(params_file):
+    try:
+        with open(params_file) as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"❌ Failed to load parameter file: {params_file}, error: {e}")
+        sys.exit(1)
+
+def provision_product(client, product_id, artifact_id, environment, parameters):
+    name = f"MyProduct-{environment}-{int(time.time())}"
+
+    print(f"\n🛠️  Provisioning product: {product_id}")
+    print(f"📦 Artifact version: {artifact_id}")
+    print(f"📁 Parameters:\n{json.dumps(parameters, indent=2)}")
+
+    try:
+        response = client.provision_product(
+            ProductId=product_id,
+            ProvisioningArtifactId=artifact_id,
+            ProvisionedProductName=name,
+            ProvisioningParameters=parameters,
+            Tags=[
+                {'Key': 'Environment', 'Value': environment},
+                {'Key': 'DeployedBy', 'Value': 'Jenkins'}
+            ]
+        )
+        record_id = response['RecordDetail']['RecordId']
+        print(f"🚀 Provisioning started. Record ID: {record_id}")
+        return record_id, name
+    except ClientError as e:
+        print(f"❌ AWS Client Error: {e}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"❌ Unexpected Error: {e}")
+        sys.exit(1)
+
+def monitor_provisioning(client, record_id):
+    print("📡 Monitoring provisioning status...")
+    while True:
+        try:
+            response = client.describe_record(Id=record_id)
+            status = response['RecordDetail']['Status']
+            print(f"⏳ Current status: {status}")
+
+            if status == 'SUCCEEDED':
+                print("✅ Provisioning completed successfully!")
+                return True
+            elif status == 'FAILED':
+                print("❌ Provisioning failed!")
+                for err in response['RecordDetail'].get('RecordErrors', []):
+                    print(f"  → {err['Description']}")
+                return False
+            elif status in ['IN_PROGRESS', 'IN_PROGRESS_IN_ERROR']:
+                time.sleep(30)
+            else:
+                print(f"❓ Unknown status: {status}")
+                time.sleep(30)
+        except ClientError as e:
+            print(f"❌ Error monitoring provisioning: {e}")
+            return False
+
+def main():
+    parser = argparse.ArgumentParser(description="Deploy AWS Service Catalog Product")
+    parser.add_argument('--product-id', required=True, help="Service Catalog Product ID")
+    parser.add_argument('--artifact-id', required=True, help="Provisioning Artifact ID")
+    parser.add_argument('--environment', required=True, choices=['dev', 'staging', 'prod'], help="Deployment environment")
+    parser.add_argument('--params-file', required=True, help="Path to JSON parameters file")
+
+    args = parser.parse_args()
+
+    client = create_service_catalog_client()
+    parameters = load_parameters(args.params_file)
+
+    record_id, name = provision_product(
+        client,
+        args.product_id,
+        args.artifact_id,
+        args.environment,
+        parameters
+    )
+
+    success = monitor_provisioning(client, record_id)
+
+    if success:
+        print(f"\n✅ Successfully provisioned: {name}")
+        sys.exit(0)
+    else:
+        print(f"\n❌ Failed to provision: {name}")
+        sys.exit(1)
+
+if __name__ == '__main__':
+    main()
